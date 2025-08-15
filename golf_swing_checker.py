@@ -191,8 +191,8 @@ class SwingChecker:
                             "frame_results": {},
                             "exceed_by": {},
                         })
-                    continue
-                    
+                        continue
+
                     # 准备帧级结果
                     frame_results = {}
                     failed_frames = []
