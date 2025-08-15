@@ -174,7 +174,7 @@ class SwingChecker:
 
             for view, condition_list in self.conditions.items():
                 if selected_views and view not in selected_views:
-                continue
+                    continue
                 for condition_name in condition_list:
                     func = self.check_functions.get(view, {}).get(condition_name)
 
