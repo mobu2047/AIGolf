@@ -82,6 +82,38 @@ BODY_POINT_NAMES = [
     "left_foot_index",
     "right_foot_index"
 ]
+
+# 统一可调阈值参数
+CHECK_PARAMS = {
+    "front": {
+        "torso_sway": {
+            # 基准垂直线向外侧偏移比例(相对肩宽)
+            "line_outer_offset_ratio": 0.02,
+            # 躯干越界允许容差(相对肩宽)
+            "torso_tolerance_ratio": 0.05,
+        },
+        "hip_rotation": {
+            # 髋部旋转角允许范围(度)
+            "min_deg": 0.0,
+            "max_deg": 25.0,
+        },
+        "shaft_range": {
+            # 杆身角允许范围(度)
+            "min_deg": 150.0,
+            "max_deg": 180.0,
+        },
+    }
+}
+
+# 每个检测项的生效阶段表达式（支持不连续），pX 映射为阶段 X-1
+# 例如 p1-p7 => 阶段 0..6
+CONDITION_STAGE_RULES = {
+    "front": {
+        "躯干偏移检测": ["p1-p8"],
+        "髋部旋转检测": ["p1-p7"],
+        "杆身范围检测": ["p6"],
+    },
+}
 MARGIN_CONFIG = {
     "6": 1,         # impact 阶段前后扩展 5 帧
     "4": 1    # top of swing 阶段前后扩展 5 帧

@@ -320,6 +320,25 @@ def process_video_and_detect():
             fps=fps
         )
 
+        # 保存剪辑清单，供侧面视频对齐使用
+        try:
+            clip_manifest = {
+                "source_fps": float(fps) if fps else None,
+                "start_frame": int(start_frame) if start_frame is not None else 0,
+                "end_frame": int(end_frame) if end_frame is not None else frame_count - 1,
+                "start_time_s": (float(start_frame) / float(fps)) if (fps and start_frame is not None) else 0.0,
+                "end_time_s": (float(end_frame) / float(fps)) if (fps and end_frame is not None) else ((frame_count - 1) / float(fps) if fps else None),
+                "extract_frame_count": int(extract_frame_count) if extract_frame_count is not None else int(frame_count),
+                "need_rotate": bool(need_rotate),
+                "rotation_type": rotation_type if 'rotation_type' in locals() else None
+            }
+            clip_manifest_path = os.path.join(output_folder, "clip_manifest.json")
+            with open(clip_manifest_path, 'w', encoding='utf-8') as mf:
+                json.dump(clip_manifest, mf)
+            print(f"[INFO] 已保存剪辑清单: {clip_manifest_path}")
+        except Exception as man_err:
+            print(f"[WARN] 保存剪辑清单失败: {str(man_err)}")
+
         # 验证提取的帧数是否正确
         if frame_count != extract_frame_count:
             print(f"[WARN] 提取的帧数({frame_count})与预期({extract_frame_count})不一致")
@@ -581,6 +600,159 @@ def check_swing_conditions_api():
             'success': False,
             'message': f'服务器错误: {str(e)}'
         }), 500
+
+@app.route("/check_swing_conditions_side", methods=["POST"])
+def check_swing_conditions_side_api():
+    """
+    侧面检测接口：与正面一致的输入输出，内部生成同一份报告文件。
+    - 读取同目录下 keypoints.pt(正面，可缺省) 与 keypoints_side.pt(侧面，可缺省)
+    - 共用 stage_indices.json
+    - 将两视角结果合并到同一报告
+    """
+    try:
+        data = request.get_json()
+        if 'video_name' not in data:
+            return jsonify({'success': False, 'message': '缺少必要参数: video_name'}), 400
+
+        video_name = data['video_name']
+        output_dir = data.get('output_dir', None)
+
+        from golf_swing_checker import check_swing_front_and_side
+
+        success, report_file = check_swing_front_and_side(
+            video_name, output_dir, generate_visualizations=True, csv_format=True
+        )
+
+        if success:
+            return jsonify({'success': True, 'message': '成功生成(正+侧)挥杆检查报告', 'report_file': report_file})
+        else:
+            return jsonify({'success': False, 'message': '生成(正+侧)挥杆检查报告失败'}), 500
+    except Exception as e:
+        print(f"[ERR] 侧面挥杆检查API出错: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'服务器错误: {str(e)}'}), 500
+
+@app.route("/process_video_side", methods=["POST"])
+def process_video_and_extract_side():
+    """
+    生成侧面关键点 keypoints_side.pt：
+    - 读取参数 video (文件) + video_name (与正面相同目录名)
+    - 读取 resultData/<video_name>/clip_manifest.json 与 stage_indices.json
+    - 依据剪辑清单按时间戳对齐侧面视频，抽帧、合成、H264 转码
+    - 从合成后的视频提取关键点，添加33/34号杆点，保存为 keypoints_side.pt
+    """
+    if "video" not in request.files:
+        return jsonify({"error": "未上传侧面视频文件"}), 400
+    if 'video_name' not in request.form:
+        return jsonify({"error": "缺少参数: video_name"}), 400
+
+    video_file = request.files["video"]
+    video_name = request.form["video_name"].strip()
+    force = request.form.get("force", "false").lower() == "true"
+
+    tmp_video_path = ""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        tmp_video_path = tmp.name
+        video_file.save(tmp_video_path)
+
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        video_dir = os.path.join(base_dir, "resultData", video_name)
+        if not os.path.exists(video_dir):
+            return jsonify({"error": f"找不到动作目录: {video_dir}"}), 400
+
+        # 路径
+        keypoints_side_path = os.path.join(video_dir, "keypoints_side.pt")
+        stage_indices_path = os.path.join(video_dir, "stage_indices.json")
+        clip_manifest_path = os.path.join(video_dir, "clip_manifest.json")
+        video_side_dir = os.path.join(video_dir, "video_side")
+        img_side_dir = os.path.join(video_dir, "img_side")
+        os.makedirs(video_side_dir, exist_ok=True)
+        os.makedirs(img_side_dir, exist_ok=True)
+
+        if os.path.exists(keypoints_side_path) and not force:
+            return jsonify({"success": True, "message": "keypoints_side.pt 已存在", "keypoints_side": keypoints_side_path})
+
+        if not os.path.exists(stage_indices_path) or not os.path.exists(clip_manifest_path):
+            return jsonify({"error": "缺少正面剪辑清单或阶段索引，请先运行正面流程"}), 400
+
+        # 读取剪辑清单
+        with open(clip_manifest_path, 'r', encoding='utf-8') as mf:
+            manifest = json.load(mf)
+        start_time_s = float(manifest.get("start_time_s", 0.0))
+        end_time_s = float(manifest.get("end_time_s", 0.0))
+        if end_time_s <= start_time_s:
+            return jsonify({"error": "剪辑清单时间非法"}), 400
+
+        # 读取侧面视频 fps
+        cap = cv2.VideoCapture(tmp_video_path)
+        fps_side = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_side_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        # 计算侧面帧范围（四舍五入到整数帧）
+        start_frame_side = max(0, int(round(start_time_s * fps_side)))
+        end_frame_side = min(total_side_frames - 1, int(round(end_time_s * fps_side)))
+        if end_frame_side <= start_frame_side:
+            return jsonify({"error": "侧面剪辑帧范围非法"}), 400
+
+        # 抽帧到 img_side/all
+        img_all_side = os.path.join(img_side_dir, "all")
+        if os.path.exists(img_all_side):
+            shutil.rmtree(img_all_side)
+        os.makedirs(img_all_side, exist_ok=True)
+
+        frame_count_side, need_rotate_side = extract_frames_to_images(
+            video_path=tmp_video_path,
+            output_dir=img_all_side,
+            start_frame=start_frame_side,
+            end_frame=end_frame_side,
+            fps=fps_side
+        )
+
+        # 合成 H264 视频 original_side.mp4
+        h264_side_tmp = os.path.join(video_side_dir, "original_side_h264_tmp.mp4")
+        create_video_from_images(img_folder=img_all_side, output_path=h264_side_tmp, fps=fps_side)
+        original_side_path = os.path.join(video_side_dir, "original_side.mp4")
+        convert_to_h264(h264_side_tmp, original_side_path)
+        try:
+            if os.path.exists(original_side_path) and os.path.getsize(original_side_path) > 0:
+                os.remove(h264_side_tmp)
+        except Exception:
+            pass
+
+        # 提取关键点并增加杆点
+        keypoint_data_side = extract_keypoints_from_video(original_side_path)
+        if keypoint_data_side.shape[0] == 0:
+            return jsonify({"error": "从侧面视频未提取到关键点"}), 400
+
+        try:
+            enhanced = add_golf_club_to_keypoints(
+                existing_keypoints=keypoint_data_side.numpy(),
+                video_path=original_side_path,
+                confidence=0.2
+            )
+            keypoint_data_side = torch.from_numpy(enhanced).float()
+        except Exception as e:
+            print(f"[WARN] 侧面添加球杆信息失败: {str(e)}")
+
+        # 保存 keypoints_side.pt
+        torch.save(keypoint_data_side, keypoints_side_path)
+        ensure_file_permissions(keypoints_side_path)
+
+        return jsonify({
+            "success": True,
+            "message": "已生成 keypoints_side.pt",
+            "keypoints_side": keypoints_side_path,
+            "frames": int(frame_count_side),
+            "fps": float(fps_side)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if tmp_video_path and os.path.exists(tmp_video_path):
+            safe_delete_file(tmp_video_path)
 
 def save_to_csv(data, csv_path):
     df = pd.DataFrame(data)
