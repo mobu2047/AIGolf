@@ -114,11 +114,11 @@ class SwingChecker:
                 "杆身范围检测": self.check_shaft_range_front,
             },
             "side": {
-                "头部K线检测": self.check_head_k_line,
-                "臀线检测": self.check_hip_line,
-                "膝盖弯曲检测": self.check_knee_bend,
-                "双脚连线水平检测": self.check_feet_line,
-                "挥杆轨迹检测": self.check_swing_path,
+                "头部K线检测": self.check_head_k_line_side,
+                "臀线检测": self.check_hip_line_side,
+                "膝盖弯曲检测": self.check_knee_bend_side,
+                "双脚连线水平检测": self.check_feet_line_side,
+                "挥杆轨迹检测": self.check_swing_path_side,
             },
         }
         return check_functions
@@ -192,7 +192,7 @@ class SwingChecker:
                             "exceed_by": {},
                         })
                         continue
-
+                    
                     # 准备帧级结果
                     frame_results = {}
                     failed_frames = []
@@ -373,6 +373,11 @@ class SwingChecker:
                             continue
                         key = (r.get("view"), r.get("condition"))
                         grouped.setdefault(key, []).append((stage_key, stage_name, failed))
+
+                # 如果没有不通过项，写入一条提示行，避免CSV视觉上“空白”
+                if not grouped:
+                    f.write("NA,NA,NA,无不通过项,通过,\n")
+                    return True
 
                 # 输出：按(视角, 检测项目)排序，再按阶段编号排序
                 for (view_key, condition) in sorted(grouped.keys(), key=lambda x: (x[0], x[1])):
@@ -609,25 +614,6 @@ class SwingChecker:
         except Exception:
             return {"ok": False}
 
-    def check_head_k_line(self, keypoints, stage_indices=None, all_keypoints=None):
-        """基础占位：头部K线检测。当前实现返回 True 保持流程可用。"""
-        return True
-
-    def check_hip_line(self, keypoints, stage_indices=None, all_keypoints=None):
-        """基础占位：臀线检测。当前实现返回 True 保持流程可用。"""
-        return True
-
-    def check_knee_bend(self, keypoints, stage_indices=None, all_keypoints=None):
-        """基础占位：膝盖弯曲检测。当前实现返回 True 保持流程可用。"""
-        return True
-
-    def check_feet_line(self, keypoints, stage_indices=None, all_keypoints=None):
-        """基础占位：双脚连线水平检测。当前实现返回 True 保持流程可用。"""
-        return True
-
-    def check_swing_path(self, keypoints, stage_indices=None, all_keypoints=None):
-        """基础占位：挥杆轨迹检测。当前实现返回 True 保持流程可用。"""
-        return True
 
     # ====== 可视化占位（与检测函数名对应）======
     def visualize_hip_rotation(self, keypoints, result, frame=None, save_path=None, stage_indices=None, all_keypoints=None):
@@ -650,6 +636,174 @@ class SwingChecker:
 
     def visualize_swing_path(self, keypoints, result, frame=None, save_path=None, stage_indices=None, all_keypoints=None):
         return self._visualize_text_only("Swing path", keypoints, result, frame, save_path)
+
+    # ====== 侧面五项检测 ======
+    def _shoulder_width(self, kp):
+        ls = kp[LEFT_SHOULDER][:2]
+        rs = kp[RIGHT_SHOULDER][:2]
+        return float(np.linalg.norm(ls - rs))
+
+    def _get_ref_sw(self, kp):
+        sw = self._get_body_scale(kp)
+        return sw if sw > 0 else max(1e-6, self._shoulder_width(kp))
+
+    def check_head_k_line_side(self, kp, stage_indices=None, all_keypoints=None):
+        try:
+            params = CHECK_PARAMS.get("side", {}).get("head_k_line", {})
+            ref_point = params.get("ref_point", "nose")
+            up_sw = float(params.get("up_sw", 0.05))
+            down_sw = float(params.get("down_sw", 0.10))
+
+            if all_keypoints is None or stage_indices is None or "0" not in stage_indices:
+                return {"ok": True}
+            ref_idx = stage_indices["0"][0]
+            ref_kp = all_keypoints[ref_idx]
+            sw = self._get_ref_sw(ref_kp)
+
+            if ref_point == "nose":
+                y0 = float(ref_kp[NOSE][1])
+                y = float(kp[NOSE][1])
+            else:
+                y0 = float((ref_kp[LEFT_EYE][1] + ref_kp[RIGHT_EYE][1]) / 2.0)
+                y = float((kp[LEFT_EYE][1] + kp[RIGHT_EYE][1]) / 2.0)
+
+            dy = (y - y0) / sw
+            ok = (-up_sw <= dy <= down_sw)
+            if ok:
+                return {"ok": True}
+            if dy > down_sw:
+                exc = dy - down_sw
+            else:
+                exc = (-up_sw - dy)
+            return {"ok": False, "exceed": {"unit": "sw", "value": float(max(0.0, exc))}}
+        except Exception:
+            return {"ok": False}
+
+    def check_hip_line_side(self, kp, stage_indices=None, all_keypoints=None):
+        try:
+            params = CHECK_PARAMS.get("side", {}).get("hip_line", {})
+            forward_sw = float(params.get("forward_sw", 0.08))
+            backward_sw = float(params.get("backward_sw", 0.06))
+            if all_keypoints is None or stage_indices is None or "0" not in stage_indices:
+                return {"ok": True}
+            ref_idx = stage_indices["0"][0]
+            ref_kp = all_keypoints[ref_idx]
+            sw = self._get_ref_sw(ref_kp)
+            x_ref = float(((ref_kp[LEFT_HIP][0] + ref_kp[RIGHT_HIP][0]) / 2.0))
+            x_now = float(((kp[LEFT_HIP][0] + kp[RIGHT_HIP][0]) / 2.0))
+            dx = (x_now - x_ref) / sw
+            ok = (-backward_sw <= dx <= forward_sw)
+            if ok:
+                return {"ok": True}
+            if dx > forward_sw:
+                exc = dx - forward_sw
+            else:
+                exc = (-backward_sw - dx)
+            return {"ok": False, "exceed": {"unit": "sw", "value": float(max(0.0, exc))}}
+        except Exception:
+            return {"ok": False}
+
+    def _knee_angle(self, kp, left=True):
+        if left:
+            return float(self._calculate_angle(kp[LEFT_HIP][:2], kp[LEFT_KNEE][:2], kp[LEFT_ANKLE][:2]))
+        return float(self._calculate_angle(kp[RIGHT_HIP][:2], kp[RIGHT_KNEE][:2], kp[RIGHT_ANKLE][:2]))
+
+    def check_knee_bend_side(self, kp, stage_indices=None, all_keypoints=None):
+        try:
+            params = CHECK_PARAMS.get("side", {}).get("knee_bend", {})
+            mode = params.get("mode", "range")
+            min_deg = float(params.get("min_deg", 150.0))
+            max_deg = float(params.get("max_deg", 175.0))
+            delta_deg = float(params.get("delta_deg", 15.0))
+
+            left = self._knee_angle(kp, True)
+            right = self._knee_angle(kp, False)
+            vals = [left, right]
+
+            if mode == "range":
+                bad = [v for v in vals if not (min_deg <= v <= max_deg)]
+                if not bad:
+                    return {"ok": True}
+                # 超出最近边界
+                def exceed_val(v):
+                    if v < min_deg:
+                        return (min_deg - v)
+                    if v > max_deg:
+                        return (v - max_deg)
+                    return 0.0
+                exc = max(exceed_val(left), exceed_val(right))
+                return {"ok": False, "exceed": {"unit": "deg", "value": float(exc)}}
+            else:
+                if stage_indices is None or all_keypoints is None or "0" not in stage_indices:
+                    return {"ok": True}
+                ref_idx = stage_indices["0"][0]
+                ref_kp = all_keypoints[ref_idx]
+                l0 = self._knee_angle(ref_kp, True)
+                r0 = self._knee_angle(ref_kp, False)
+                exc = max(abs(left - l0), abs(right - r0)) - delta_deg
+                if exc <= 0:
+                    return {"ok": True}
+                return {"ok": False, "exceed": {"unit": "deg", "value": float(exc)}}
+        except Exception:
+            return {"ok": False}
+
+    def check_feet_line_side(self, kp, stage_indices=None, all_keypoints=None):
+        try:
+            params = CHECK_PARAMS.get("side", {}).get("feet_line", {})
+            point = params.get("point", "foot_index")
+            max_deg = float(params.get("max_deg", 2.5))
+            if point == "heel":
+                p1 = kp[LEFT_HEEL][:2]
+                p2 = kp[RIGHT_HEEL][:2]
+            else:
+                p1 = kp[LEFT_FOOT_INDEX][:2]
+                p2 = kp[RIGHT_FOOT_INDEX][:2]
+            dx = float(p2[0] - p1[0])
+            dy = float(p2[1] - p1[1])
+            angle = abs(np.degrees(np.arctan2(dy, dx)))
+            if angle <= max_deg:
+                return {"ok": True}
+            return {"ok": False, "exceed": {"unit": "deg", "value": float(angle - max_deg)}}
+        except Exception:
+            return {"ok": False}
+
+    def check_swing_path_side(self, kp, stage_indices=None, all_keypoints=None):
+        try:
+            # 需要 club 手与头两点
+            if kp.shape[0] <= max(CLUB_HAND_INDEX, CLUB_HEAD_INDEX):
+                return {"ok": True}
+            params = CHECK_PARAMS.get("side", {}).get("swing_path", {})
+            lower_rel = float(params.get("lower_rel", -20.0))
+            upper_rel = float(params.get("upper_rel", 20.0))
+
+            # address 基线角（阶段1首帧近似）
+            if stage_indices and all_keypoints and "1" in stage_indices and stage_indices["1"]:
+                addr_idx = stage_indices["1"][0]
+                addr_kp = all_keypoints[addr_idx]
+            else:
+                addr_kp = kp
+            v_addr = addr_kp[CLUB_HEAD_INDEX][:2] - addr_kp[CLUB_HAND_INDEX][:2]
+            addr_angle = float(np.degrees(np.arctan2(v_addr[1], v_addr[0])))
+
+            v_now = kp[CLUB_HEAD_INDEX][:2] - kp[CLUB_HAND_INDEX][:2]
+            now_angle = float(np.degrees(np.arctan2(v_now[1], v_now[0])))
+            diff = now_angle - addr_angle
+            # 归一到 [-180,180]
+            while diff > 180:
+                diff -= 360
+            while diff < -180:
+                diff += 360
+
+            if lower_rel <= diff <= upper_rel:
+                return {"ok": True}
+            exc = 0.0
+            if diff < lower_rel:
+                exc = lower_rel - diff
+            else:
+                exc = diff - upper_rel
+            return {"ok": False, "exceed": {"unit": "deg", "value": float(exc)}}
+        except Exception:
+            return {"ok": False}
 
 def load_keypoints(keypoints_file):
     """

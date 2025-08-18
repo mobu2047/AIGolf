@@ -103,6 +103,36 @@ CHECK_PARAMS = {
             "max_deg": 180.0,
         },
     }
+    ,
+    "side": {
+        "head_k_line": {
+            "ref_point": "nose",
+            "up_sw": 0.05,
+            "down_sw": 0.10,
+            "smooth_win": 5
+        },
+        "hip_line": {
+            "use_center": True,
+            "forward_sw": 0.08,
+            "backward_sw": 0.06,
+            "smooth_win": 5
+        },
+        "knee_bend": {
+            "mode": "range",
+            "min_deg": 150.0,
+            "max_deg": 175.0,
+            "delta_deg": 15.0
+        },
+        "feet_line": {
+            "point": "foot_index",
+            "max_deg": 2.5
+        },
+        "swing_path": {
+            "use_baseline": "shaft",
+            "lower_rel": -20.0,
+            "upper_rel": 20.0
+        }
+    }
 }
 
 # 每个检测项的生效阶段表达式（支持不连续），pX 映射为阶段 X-1
@@ -113,6 +143,13 @@ CONDITION_STAGE_RULES = {
         "髋部旋转检测": ["p1-p7"],
         "杆身范围检测": ["p6"],
     },
+    "side": {
+        "头部K线检测": ["p1-p7"],
+        "臀线检测": ["p1-p7"],
+        "膝盖弯曲检测": ["p1-p7"],
+        "双脚连线水平检测": ["p1"],
+        "挥杆轨迹检测": ["p1-p8"]
+    }
 }
 MARGIN_CONFIG = {
     "6": 1,         # impact 阶段前后扩展 5 帧

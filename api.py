@@ -109,7 +109,7 @@ def safe_delete_file(file_path):
                 import time
                 time.sleep(1)
 
-def extract_frames_to_images(video_path, output_dir, start_frame, end_frame, fps=30.0):
+def extract_frames_to_images(video_path, output_dir, start_frame, end_frame, fps=30.0, rotation_type: str = "auto"):
     """
     将视频中的帧提取为图片
     
@@ -119,10 +119,11 @@ def extract_frames_to_images(video_path, output_dir, start_frame, end_frame, fps
         start_frame: 起始帧
         end_frame: 结束帧
         fps: 帧率
+        rotation_type: 图像旋转方式 ('none'|'clockwise'|'counterclockwise'|'auto')
         
     返回:
         frame_count: 提取的帧数
-        need_rotate: 是否需要旋转视频
+        need_rotate: 是否进行了旋转（基于 rotation_type 应用的结果）
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -130,14 +131,24 @@ def extract_frames_to_images(video_path, output_dir, start_frame, end_frame, fps
     total_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    need_rotate = (width > height)  # 判断是否需要旋转
+    # 计算实际应用的旋转策略
+    applied_rotation_type = "none"
+    if rotation_type in ("clockwise", "counterclockwise", "rotate180"):
+        applied_rotation_type = rotation_type
+    elif rotation_type == "auto":
+        if width > height:
+            applied_rotation_type = "clockwise"
+        else:
+            applied_rotation_type = "none"
+    else:
+        applied_rotation_type = "none"
     
     # 确保帧索引在有效范围内
     start_frame = max(0, start_frame) if start_frame is not None else 0
     end_frame = min(total_frame_count - 1, end_frame) if end_frame is not None else total_frame_count - 1
     frame_count = end_frame - start_frame + 1
     
-    print(f"[INFO] 正在保存视频帧到 {output_dir}，帧范围：{start_frame}-{end_frame}，共 {frame_count} 帧")
+    print(f"[INFO] 正在保存视频帧到 {output_dir}，帧范围：{start_frame}-{end_frame}，共 {frame_count} 帧，rotation={applied_rotation_type}")
     
     # 定位到起始帧
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -152,16 +163,20 @@ def extract_frames_to_images(video_path, output_dir, start_frame, end_frame, fps
             print(f"[WARN] 读取第 {start_frame+i} 帧失败，提前结束")
             break
             
-        # 如果需要旋转(横屏视频)，进行90度顺时针旋转
-        if need_rotate:
+        # 旋转策略
+        if applied_rotation_type == "clockwise":
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif applied_rotation_type == "counterclockwise":
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif applied_rotation_type == "rotate180":
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
             
         # 保存图片，使用从0开始的帧索引
         out_name = f"frame{i:04d}.jpg"
         cv2.imwrite(os.path.join(output_dir, out_name), frame, image_quality)
     
     cap.release()
-    return frame_count, need_rotate
+    return frame_count, (applied_rotation_type != "none")
 
 def create_video_from_images(img_folder, output_path, fps=30.0, img_pattern="frame*.jpg"):
     """
@@ -218,6 +233,40 @@ def ensure_h264_encoding(video_path):
     except Exception as e:
         print(f"[WARN] 视频转换为H264过程中出错: {str(e)}")
         return False
+
+# ---- Helper: robust hand-top (wrist highest) detection ----
+def _compute_wrist_top_idx_from_keypoints(kpts) -> int:
+    """
+    从关键点序列鲁棒计算“手部最高点”帧索引。
+    策略：使用左右手腕Y坐标的均值，做简单滑窗平滑后取最小值索引。
+    支持形状 (N, 33, 2|3) 或 torch.Tensor。
+    """
+    try:
+        if isinstance(kpts, torch.Tensor):
+            kpts = kpts.detach().cpu().numpy()
+        kpts = np.asarray(kpts)
+        if kpts.ndim != 3 or kpts.shape[1] < 17:
+            return 0
+        y_left = kpts[:, 15, 1]
+        y_right = kpts[:, 16, 1]
+        y = (y_left + y_right) / 2.0
+        # 将明显无效(0)的帧替换为均值，避免干扰
+        valid = (y > 0)
+        if valid.any():
+            mean_val = y[valid].mean()
+            y[~valid] = mean_val
+        # 简单滑动平均平滑
+        w = 7
+        if len(y) >= w:
+            kernel = np.ones(w, dtype=np.float64) / w
+            y_smooth = np.convolve(y, kernel, mode='same')
+        else:
+            y_smooth = y
+        # Y越小越高
+        idx = int(np.argmin(y_smooth))
+        return max(0, min(idx, len(y_smooth) - 1))
+    except Exception:
+        return 0
 
 @app.route("/process_video", methods=["POST"])
 def process_video_and_detect():
@@ -317,7 +366,8 @@ def process_video_and_detect():
             output_dir=img_all_dir,
             start_frame=start_frame,
             end_frame=end_frame,
-            fps=fps
+            fps=fps,
+            rotation_type=(rotation_type if 'rotation_type' in locals() and rotation_type else 'auto')
         )
 
         # 保存剪辑清单，供侧面视频对齐使用
@@ -343,7 +393,7 @@ def process_video_and_detect():
         if frame_count != extract_frame_count:
             print(f"[WARN] 提取的帧数({frame_count})与预期({extract_frame_count})不一致")
         
-        # 5. 基于图片合成H264视频
+        # 5. 基于图片合成H264视频（注意：这里合成的是剪裁窗口，且使用与导出帧一致的朝向，无需再额外旋转）
         h264_video_path = os.path.join(video_folder, "original_h264.mp4")
         create_video_from_images(
             img_folder=img_all_dir,
@@ -696,7 +746,14 @@ def process_video_and_extract_side():
                 front_top_idx = int(front_stage_indices[cand][0])
                 break
         if front_top_idx is None:
-            return jsonify({"error": "正面阶段缺少顶点(手最高)信息"}), 400
+            # 回退：使用正面keypoints计算一个手部最高点
+            try:
+                front_keypoints_path = os.path.join(video_dir, "keypoints.pt")
+                front_kpts = torch.load(front_keypoints_path)
+                front_top_idx = _compute_wrist_top_idx_from_keypoints(front_kpts)
+                print(f"[INFO] 回退计算得到 front_top_idx={front_top_idx}")
+            except Exception:
+                return jsonify({"error": "正面阶段缺少顶点(手最高)信息"}), 400
 
         # 读取侧面视频信息
         cap = cv2.VideoCapture(tmp_video_path)
@@ -710,22 +767,15 @@ def process_video_and_extract_side():
         if side_full_keypoints.shape[0] == 0:
             return jsonify({"error": "从侧面视频未提取到关键点"}), 400
 
-        try:
-            side_stage_indices, _ = analyzer.identify_swing_stages(side_full_keypoints, top_k=1)
-            side_top_idx = None
-            for cand in ["3", "4"]:
-                if cand in side_stage_indices and side_stage_indices[cand]:
-                    side_top_idx = int(side_stage_indices[cand][0])
-                    break
-        except Exception as e:
-            print(f"[WARN] 侧面阶段识别失败，回退为全局最高点: {str(e)}")
-            # 回退：直接用手腕Y的全局最小值作为顶点
-            side_np = side_full_keypoints.numpy() if isinstance(side_full_keypoints, torch.Tensor) else side_full_keypoints
-            wrists_y = (side_np[:, 15, 1] + side_np[:, 16, 1]) / 2.0
-            side_top_idx = int(np.argmin(wrists_y))
-
+      
+           
+        side_top_idx = _compute_wrist_top_idx_from_keypoints(side_full_keypoints)
+        side_rotation_type = "auto"
         if side_top_idx is None:
             return jsonify({"error": "无法确定侧面顶点(手最高)帧"}), 400
+
+        # 日志：记录两侧顶点帧索引
+        print(f"[INFO] 顶点(手最高)对齐: front_top_idx={front_top_idx}, side_top_idx={side_top_idx}")
 
         # 以顶点对齐：保证侧面的顶点与正面顶点处于同一相对帧
         side_start_frame = side_top_idx - front_top_idx
@@ -744,22 +794,54 @@ def process_video_and_extract_side():
             shutil.rmtree(img_all_side)
         os.makedirs(img_all_side, exist_ok=True)
 
+        # 将阶段识别的坐标系旋转语义映射到像素图像旋转：
+        # 分析：identify_swing_stages 中的 "clockwise" 等价于像素的 90° 逆时针；
+        #       "counterclockwise" 等价于像素的 90° 顺时针。
+        if side_rotation_type == "clockwise":
+            rotation_for_frames_side = "counterclockwise"
+        elif side_rotation_type == "counterclockwise":
+            rotation_for_frames_side = "clockwise"
+        else:
+            rotation_for_frames_side = side_rotation_type
+
         frame_count_side, need_rotate_side = extract_frames_to_images(
             video_path=tmp_video_path,
             output_dir=img_all_side,
             start_frame=side_start_frame,
             end_frame=side_end_frame,
-            fps=fps_side
+            fps=fps_side,
+            rotation_type=rotation_for_frames_side
         )
 
-        # 合成 H264 视频 original_side.mp4
+        # 合成 H264 视频 original_side.mp4（同理，使用导出的帧，不再额外旋转）
         h264_side_tmp = os.path.join(video_side_dir, "original_side_h264_tmp.mp4")
         create_video_from_images(img_folder=img_all_side, output_path=h264_side_tmp, fps=fps_side)
         original_side_path = os.path.join(video_side_dir, "original_side.mp4")
         convert_to_h264(h264_side_tmp, original_side_path)
+
+        # 额外保障：若最终像素方向与 rotation_for_frames_side 仍不一致，则按该方向重写像素
+        if not os.path.exists(original_side_path) or os.path.getsize(original_side_path) == 0:
+            print("[INFO] ffmpeg不可用，使用AVI/临时文件作为侧面关键点提取输入")
+            original_side_path = h264_side_tmp
+        else:
+            if rotation_for_frames_side and rotation_for_frames_side != 'none':
+                try:
+                    # 像素级旋转，避免依赖容器元数据
+                    from pathlib import Path
+                    tmp_fix = str(Path(original_side_path).with_suffix('.fix.mp4'))
+                    reencode_with_rotation(original_side_path, tmp_fix, rotation_for_frames_side)
+                    if os.path.exists(tmp_fix) and os.path.getsize(tmp_fix) > 0:
+                        os.remove(original_side_path)
+                        os.replace(tmp_fix, original_side_path)
+                        print(f"[INFO] 已按 {rotation_for_frames_side} 重写侧面像素方向")
+                except Exception as _:
+                    pass
+
         try:
-            if os.path.exists(original_side_path) and os.path.getsize(original_side_path) > 0:
-                os.remove(h264_side_tmp)
+            # 仅当真正产出 original_side.mp4 时才删除临时文件
+            if os.path.exists(original_side_path) and os.path.samefile(original_side_path, h264_side_tmp) is False:
+                if os.path.exists(h264_side_tmp):
+                    os.remove(h264_side_tmp)
         except Exception:
             pass
 

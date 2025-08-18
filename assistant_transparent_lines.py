@@ -1342,13 +1342,13 @@ def generate_transparent_assistant_lines(
     
     # 仅当未提供宽高参数时才读取视频获取尺寸
     if video_width is None or video_height is None:
-    # 读取视频确定尺寸
+        # 读取视频确定尺寸
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"[ERR] 无法打开视频: {video_path}")
             return []
-    
-    # 获取视频信息
+        
+        # 获取视频信息
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -1358,8 +1358,25 @@ def generate_transparent_assistant_lines(
         print(f"[INFO] 使用传入的视频尺寸: {video_width}x{video_height}")
         total_frames = len(keypoint_data)
     
-    # 自动检测是否需要旋转
-    need_rotate = (video_width > video_height)
+    # 从 manifest 读取 rotation_type → 标准化 need_rotate
+    # 文件路径: <output_base_folder>/clip_manifest.json
+    manifest_path = os.path.join(output_base_folder, "clip_manifest.json")
+    rotation_type = None
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as mf:
+                manifest = json.load(mf)
+                rotation_type = manifest.get('rotation_type')
+        except Exception as e:
+            print(f"[WARN] 读取clip_manifest失败: {str(e)}")
+    
+    # 以 rotation_type 为准，不再用宽高比推断
+    if need_rotate is None:
+        if rotation_type in ("clockwise", "counterclockwise", "rotate180"):
+            need_rotate = True
+        else:
+            need_rotate = False
+    print(f"[INFO] 辅助线方向: rotation_type={rotation_type}, need_rotate={need_rotate}")
     
     # 创建正确的辅助线生成器
     if line_type == "stance":

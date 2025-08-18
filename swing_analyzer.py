@@ -312,12 +312,12 @@ class SwingAnalyzer:
             if head_at_right:
                 # 头部在右侧，需要顺时针旋转，翻转y坐标
                 print(f"[INFO] 检测到头部在右侧，应用顺时针旋转")
-                rotated_X[:, :, 1] = 1.0 - rotated_X[:, :, 1]
+                rotated_X[:, :, 0] = 1.0 - rotated_X[:, :, 0]
                 rotation_type = "clockwise"
             else:
                 # 头部在左侧，需要逆时针旋转，翻转x坐标
                 print(f"[INFO] 检测到头部在左侧，应用逆时针旋转")
-                rotated_X[:, :, 0] = 1.0 - rotated_X[:, :, 0]
+                rotated_X[:, :, 1] = 1.0 - rotated_X[:, :, 1]
                 rotation_type = "counterclockwise"
             
             # 使用旋转后的坐标进行后续处理

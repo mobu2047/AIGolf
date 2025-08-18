@@ -205,7 +205,7 @@ def add_golf_club_to_keypoints(existing_keypoints, video_path, model_path=None, 
     在现有关键点数据基础上添加球杆检测信息
     
     Args:
-        existing_keypoints: 现有关键点数据，形状为 (帧数, 33, 3)
+        existing_keypoints: 现有关键点数据，形状为 (帧数, 33, 2) 或 (帧数, 33, 3)
         video_path: 视频文件路径
         model_path: YOLO模型路径
         confidence: 检测置信度阈值
@@ -217,6 +217,23 @@ def add_golf_club_to_keypoints(existing_keypoints, video_path, model_path=None, 
     logger.info("开始添加球杆检测信息到关键点数据")
     
     try:
+        # 统一 existing_keypoints 到 numpy float32，最后一维确保为3（x,y,visibility）
+        if isinstance(existing_keypoints, torch.Tensor):
+            existing_keypoints = existing_keypoints.detach().cpu().numpy()
+        existing_keypoints = np.asarray(existing_keypoints)
+        if existing_keypoints.ndim != 3 or existing_keypoints.shape[1] < 33:
+            logger.warning(f"关键点形状异常: {existing_keypoints.shape}, 直接返回原数据")
+            return existing_keypoints
+
+        if existing_keypoints.shape[2] == 2:
+            # 补visibility通道，默认1.0
+            vis = np.ones((existing_keypoints.shape[0], existing_keypoints.shape[1], 1), dtype=existing_keypoints.dtype)
+            existing_keypoints = np.concatenate([existing_keypoints, vis], axis=2)
+            logger.info("已为人体关键点补充visibility通道 (33x3)")
+        elif existing_keypoints.shape[2] > 3:
+            # 只取前3个通道
+            existing_keypoints = existing_keypoints[:, :, :3]
+            logger.info("已截取人体关键点前三个通道为 (x,y,visibility)")
         # 创建球杆检测器
         detector = GolfClubDetector(model_path, confidence)
         
@@ -236,7 +253,17 @@ def add_golf_club_to_keypoints(existing_keypoints, video_path, model_path=None, 
             existing_keypoints = existing_keypoints[:min_frames]
             golf_club_keypoints = golf_club_keypoints[:min_frames]
         
-        # 合并关键点数据
+        # 合并关键点数据 (帧, 33,3) + (帧, 2,3) -> (帧, 35,3)
+        if golf_club_keypoints.shape[2] != existing_keypoints.shape[2]:
+            # 对齐通道维度：若人体使用3通道，这里也应是3通道（已是3）
+            # 若出现异常，做安全对齐
+            if golf_club_keypoints.shape[2] == 2:
+                # 极少数情况，补置信度1.0
+                vis_c = np.ones((golf_club_keypoints.shape[0], golf_club_keypoints.shape[1], 1), dtype=golf_club_keypoints.dtype)
+                golf_club_keypoints = np.concatenate([golf_club_keypoints, vis_c], axis=2)
+            else:
+                golf_club_keypoints = golf_club_keypoints[:, :, :3]
+
         enhanced_keypoints = np.concatenate([existing_keypoints, golf_club_keypoints], axis=1)
         
         logger.info(f"成功添加球杆检测信息:")

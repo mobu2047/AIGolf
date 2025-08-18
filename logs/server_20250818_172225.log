@@ -1,0 +1,30 @@
+[INFO] 服务器启动于 http://0.0.0.0:5000[INFO] 服务器启动于 http://0.0.0.0:5000
+
+计算得到的参考尺度为: 0.08000299334526062计算得到的参考尺度为: 0.08000299334526062
+
+执行正侧面联合挥杆检查时出错: 'list_iterator' object is not callable执行正侧面联合挥杆检查时出错: 'list_iterator' object is not callable
+
+Traceback (most recent call last):
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 1023, in check_swing_front_and_side
+    front_results = checker_front.check_swing(
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 1023, in check_swing_front_and_side
+    front_results = checker_front.check_swing(
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 1023, in check_swing_front_and_side
+    front_results = checker_front.check_swing(
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 141, in check_swing
+    results = self._perform_swing_checks(keypoints, stage_indices, selected_views)
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 141, in check_swing
+    results = self._perform_swing_checks(keypoints, stage_indices, selected_views)
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 141, in check_swing
+    results = self._perform_swing_checks(keypoints, stage_indices, selected_views)
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 182, in _perform_swing_checks
+    allowed_stages = self._get_allowed_stages_for_condition(view, condition_name, stage_indices)
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 182, in _perform_swing_checks
+    allowed_stages = self._get_allowed_stages_for_condition(view, condition_name, stage_indices)
+  File "C:\Users\tiany\Desktop\ag\AIGolf\golf_swing_checker.py", line 182, in _perform_swing_checks
+    allowed_stages = self._get_allowed_stages_for_condition(view, condition_name, stage_indices)
+TypeError: 'list_iterator' object is not callable
+TypeError: 'list_iterator' object is not callable
+TypeError: 'list_iterator' object is not callable
