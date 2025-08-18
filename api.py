@@ -676,27 +676,69 @@ def process_video_and_extract_side():
         if not os.path.exists(stage_indices_path) or not os.path.exists(clip_manifest_path):
             return jsonify({"error": "缺少正面剪辑清单或阶段索引，请先运行正面流程"}), 400
 
-        # 读取剪辑清单
+        # 读取剪辑清单（用于获取正面裁剪长度）
         with open(clip_manifest_path, 'r', encoding='utf-8') as mf:
             manifest = json.load(mf)
-        start_time_s = float(manifest.get("start_time_s", 0.0))
-        end_time_s = float(manifest.get("end_time_s", 0.0))
-        if end_time_s <= start_time_s:
-            return jsonify({"error": "剪辑清单时间非法"}), 400
+        # 正面裁剪长度（帧数）
+        if manifest.get("extract_frame_count") is not None:
+            front_clip_len = int(manifest["extract_frame_count"])
+        else:
+            sf = int(manifest.get("start_frame", 0) or 0)
+            ef = int(manifest.get("end_frame", 0) or 0)
+            front_clip_len = max(1, ef - sf + 1)
 
-        # 读取侧面视频 fps
+        # 读取正面阶段，取顶点(手最高)的帧索引
+        with open(stage_indices_path, 'r', encoding='utf-8') as sfp:
+            front_stage_indices = json.load(sfp)
+        front_top_idx = None
+        for cand in ["3", "4"]:  # 兼容两种映射
+            if cand in front_stage_indices and front_stage_indices[cand]:
+                front_top_idx = int(front_stage_indices[cand][0])
+                break
+        if front_top_idx is None:
+            return jsonify({"error": "正面阶段缺少顶点(手最高)信息"}), 400
+
+        # 读取侧面视频信息
         cap = cv2.VideoCapture(tmp_video_path)
         fps_side = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total_side_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
 
-        # 计算侧面帧范围（四舍五入到整数帧）
-        start_frame_side = max(0, int(round(start_time_s * fps_side)))
-        end_frame_side = min(total_side_frames - 1, int(round(end_time_s * fps_side)))
-        if end_frame_side <= start_frame_side:
-            return jsonify({"error": "侧面剪辑帧范围非法"}), 400
+        # 从侧面原始视频直接提取关键点（整段），用于定位侧面顶点帧
+        print("[INFO] 从侧面原始视频提取关键点以定位顶点...")
+        side_full_keypoints = extract_keypoints_from_video(tmp_video_path)
+        if side_full_keypoints.shape[0] == 0:
+            return jsonify({"error": "从侧面视频未提取到关键点"}), 400
 
-        # 抽帧到 img_side/all
+        try:
+            side_stage_indices, _ = analyzer.identify_swing_stages(side_full_keypoints, top_k=1)
+            side_top_idx = None
+            for cand in ["3", "4"]:
+                if cand in side_stage_indices and side_stage_indices[cand]:
+                    side_top_idx = int(side_stage_indices[cand][0])
+                    break
+        except Exception as e:
+            print(f"[WARN] 侧面阶段识别失败，回退为全局最高点: {str(e)}")
+            # 回退：直接用手腕Y的全局最小值作为顶点
+            side_np = side_full_keypoints.numpy() if isinstance(side_full_keypoints, torch.Tensor) else side_full_keypoints
+            wrists_y = (side_np[:, 15, 1] + side_np[:, 16, 1]) / 2.0
+            side_top_idx = int(np.argmin(wrists_y))
+
+        if side_top_idx is None:
+            return jsonify({"error": "无法确定侧面顶点(手最高)帧"}), 400
+
+        # 以顶点对齐：保证侧面的顶点与正面顶点处于同一相对帧
+        side_start_frame = side_top_idx - front_top_idx
+        side_start_frame = max(0, side_start_frame)
+        side_end_frame = side_start_frame + front_clip_len - 1
+        if side_end_frame >= total_side_frames:
+            shift = side_end_frame - (total_side_frames - 1)
+            side_start_frame = max(0, side_start_frame - shift)
+            side_end_frame = total_side_frames - 1
+        if side_end_frame <= side_start_frame:
+            return jsonify({"error": "侧面裁剪窗口非法(长度<=0)"}), 400
+
+        # 抽帧到 img_side/all（按对齐窗口）
         img_all_side = os.path.join(img_side_dir, "all")
         if os.path.exists(img_all_side):
             shutil.rmtree(img_all_side)
@@ -705,8 +747,8 @@ def process_video_and_extract_side():
         frame_count_side, need_rotate_side = extract_frames_to_images(
             video_path=tmp_video_path,
             output_dir=img_all_side,
-            start_frame=start_frame_side,
-            end_frame=end_frame_side,
+            start_frame=side_start_frame,
+            end_frame=side_end_frame,
             fps=fps_side
         )
 
