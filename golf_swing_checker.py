@@ -142,12 +142,139 @@ class SwingChecker:
         
         # 2. 如果需要生成可视化，使用检查结果生成可视化
         if generate_visualizations and vis_dir:
-            pass
             self._generate_visualizations(keypoints, results, stage_indices, vis_dir, video_id)
         
         return results
     def _generate_visualizations(self,keypoints, results, stage_indices, vis_dir, video_id):
-        pass
+        import cv2
+        # 仅输出失败帧图片；不再生成参考帧，也不预创建阶段目录
+        if not os.path.exists(vis_dir):
+            os.makedirs(vis_dir, exist_ok=True)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        img_dir = os.path.join(base_dir, 'resultData', str(video_id), 'img', 'all')
+        # 抽取某阶段的躯干偏移结果
+        def get_torso(sk):
+            sd = results.get(str(sk))
+            if not sd:
+                return None
+            for r in sd.get("results", []):
+                if r.get("view") == "front" and r.get("condition") == "躯干偏移检测":
+                    return r
+            return None
+        # 仅对失败帧绘制，并在需要写文件时才创建目录
+        for sk, fl in stage_indices.items():
+            tr = get_torso(sk)
+            if not tr:
+                continue
+            failed = tr.get("failed_frames", [])
+            if not failed:
+                continue
+            stage_dir = os.path.join(vis_dir, f"frame_{fl[0] if fl else 'unknown'}")
+            for fi in failed:
+                if fi >= len(keypoints):
+                    continue
+                if not os.path.exists(stage_dir):
+                    os.makedirs(stage_dir, exist_ok=True)
+                frame = None
+                ffile = os.path.join(img_dir, f"frame{fi:04d}.jpg")
+                if os.path.exists(ffile):
+                    frame = cv2.imread(ffile)
+                sname = f"s{sk}_f{fi:04d}_torso_sway_fail.jpg"
+                spath = os.path.join(stage_dir, sname)
+                try:
+                    self.visualize_torso_sway_front(keypoints[fi], False, frame, spath, stage_indices, keypoints)
+                except Exception as e:
+                    print(f"[WARN] 躯干失败帧可视化失败: {e}")
+
+    def visualize_torso_sway_front(self, keypoints, result, frame=None, save_path=None, stage_indices=None, all_keypoints=None):
+        import cv2
+        import numpy as np
+        # 参考（阶段0）
+        # 注意：all_keypoints 可能是 numpy 数组，不能直接用于布尔判断
+        if (stage_indices is not None) and (all_keypoints is not None) and ("0" in stage_indices) and stage_indices["0"]:
+            ref_idx = stage_indices["0"][0]
+            ref_kp = all_keypoints[ref_idx]
+        else:
+            ref_kp = keypoints
+        params = CHECK_PARAMS.get("front", {}).get("torso_sway", {})
+        offset_ratio = float(params.get("line_outer_offset_ratio", 0.02))
+        tol_ratio = float(params.get("torso_tolerance_ratio", 0.05))
+        # 画布
+        if frame is None:
+            min_xy = np.min(keypoints[:, :2], axis=0)
+            max_xy = np.max(keypoints[:, :2], axis=0)
+            w = int((max_xy[0] - min_xy[0]) * 800) + 80
+            h = int((max_xy[1] - min_xy[1]) * 800) + 80
+            w = max(320, w)
+            h = max(320, h)
+            frame = np.ones((h, w, 3), dtype=np.uint8) * 255
+            scale = np.array([w, h])
+            pts = keypoints[:, :2] * scale
+        else:
+            h, w = frame.shape[:2]
+            scale = np.array([w, h])
+            pts = keypoints[:, :2] * scale
+        # 走廊参数（像素）
+        sw = self._get_ref_sw(ref_kp) * w
+        # 以图像坐标的左右为准（x 小为左，x 大为右）
+        foot_x1 = float(ref_kp[LEFT_FOOT_INDEX][0] * w)
+        foot_x2 = float(ref_kp[RIGHT_FOOT_INDEX][0] * w)
+        left_line = min(foot_x1, foot_x2) - offset_ratio * sw
+        right_line = max(foot_x1, foot_x2) + offset_ratio * sw
+        tol = tol_ratio * sw
+        # 实际边界
+        lsx = float(pts[LEFT_SHOULDER][0])
+        rsx = float(pts[RIGHT_SHOULDER][0])
+        lhx = float(pts[LEFT_HIP][0])
+        rhx = float(pts[RIGHT_HIP][0])
+        left_edge = min(lsx, rsx, lhx, rhx)
+        right_edge = max(lsx, rsx, lhx, rhx)
+        # 区域与线条
+        line_top = int(min(pts[LEFT_SHOULDER][1], pts[RIGHT_SHOULDER][1]) - 40)
+        line_bot = int(max(pts[LEFT_ANKLE][1], pts[LEFT_FOOT_INDEX][1], pts[RIGHT_FOOT_INDEX][1]) + 30)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (int(left_line - tol), line_top), (int(right_line + tol), line_bot), (0, 220, 0), -1)
+        cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
+        self._draw_dashed_line(frame, (int(left_line), line_top), (int(left_line), line_bot), (0, 255, 255), 2)
+        self._draw_dashed_line(frame, (int(right_line), line_top), (int(right_line), line_bot), (0, 255, 255), 2)
+        self._draw_dashed_line(frame, (int(left_line - tol), line_top), (int(left_line - tol), line_bot), (0, 200, 0), 1)
+        self._draw_dashed_line(frame, (int(right_line + tol), line_top), (int(right_line + tol), line_bot), (0, 200, 0), 1)
+        col_l = (0, 200, 0) if left_edge >= (left_line - tol) else (0, 0, 255)
+        col_r = (0, 200, 0) if right_edge <= (right_line + tol) else (0, 0, 255)
+        cv2.line(frame, (int(left_edge), line_top), (int(left_edge), line_bot), col_l, 2)
+        cv2.line(frame, (int(right_edge), line_top), (int(right_edge), line_bot), col_r, 2)
+        res_col = (0, 200, 0) if result else (0, 0, 255)
+        cv2.putText(frame, "Torso sway (front)", (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)
+        cv2.putText(frame, f"offset={offset_ratio:.3f}S, tol={tol_ratio:.3f}S", (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (40, 40, 40), 2)
+        cv2.putText(frame, f"Result: {'PASS' if result else 'FAIL'}", (12, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, res_col, 2)
+        if save_path:
+            cv2.imwrite(save_path, frame)
+        return frame
+
+    def _draw_dashed_line(self, img, pt1, pt2, color, thickness=1, dash_len=10, gap_len=6):
+        """
+        绘制虚线段
+        - 使用等分法在两点之间绘制若干短线段
+        """
+        import numpy as np
+        x1, y1 = pt1
+        x2, y2 = pt2
+        dist = max(1, int(np.hypot(x2 - x1, y2 - y1)))
+        # 计算需要多少个 dash+gap 周期
+        num = max(1, dist // (dash_len + gap_len))
+        for i in range(num + 1):
+            start_ratio = (i * (dash_len + gap_len)) / max(1, dist)
+            end_ratio = ((i * (dash_len + gap_len)) + dash_len) / max(1, dist)
+            if start_ratio > 1:
+                break
+            end_ratio = min(1.0, end_ratio)
+            xs = int(x1 + (x2 - x1) * start_ratio)
+            ys = int(y1 + (y2 - y1) * start_ratio)
+            xe = int(x1 + (x2 - x1) * end_ratio)
+            ye = int(y1 + (y2 - y1) * end_ratio)
+            import cv2
+            cv2.line(img, (xs, ys), (xe, ye), color, thickness)
+
     def _perform_swing_checks(self, keypoints, stage_indices, selected_views=None):
         """
         执行挥杆检查，收集检查结果
@@ -516,19 +643,22 @@ class SwingChecker:
             if shoulder_width <= 0:
                 return {"ok": True}
 
-            left_toe_x = ref_kp[LEFT_FOOT_INDEX][0]
-            right_toe_x = ref_kp[RIGHT_FOOT_INDEX][0]
+            # 取图像坐标意义上的左/右（小x为左，大x为右），避免人体左右与图像左右混淆
+            foot_x1 = float(ref_kp[LEFT_FOOT_INDEX][0])
+            foot_x2 = float(ref_kp[RIGHT_FOOT_INDEX][0])
+            x_left_ref = min(foot_x1, foot_x2)
+            x_right_ref = max(foot_x1, foot_x2)
             # 基准两线：向外各扩 offset_ratio * S
-            left_line = left_toe_x - offset_ratio * shoulder_width
-            right_line = right_toe_x + offset_ratio * shoulder_width
+            left_line = x_left_ref - offset_ratio * shoulder_width
+            right_line = x_right_ref + offset_ratio * shoulder_width
 
-            # 当前帧 torso 左/右边界
-            lsx = keypoints[LEFT_SHOULDER][0]
-            rsx = keypoints[RIGHT_SHOULDER][0]
-            lhx = keypoints[LEFT_HIP][0]
-            rhx = keypoints[RIGHT_HIP][0]
-            left_edge = min(lsx, lhx)
-            right_edge = max(rsx, rhx)
+            # 当前帧 torso 左/右边界（按图像x最小/最大确定左右边）
+            lsx = float(keypoints[LEFT_SHOULDER][0])
+            rsx = float(keypoints[RIGHT_SHOULDER][0])
+            lhx = float(keypoints[LEFT_HIP][0])
+            rhx = float(keypoints[RIGHT_HIP][0])
+            left_edge = min(lsx, rsx, lhx, rhx)
+            right_edge = max(lsx, rsx, lhx, rhx)
 
             # 容差范围扩张
             tol = tol_ratio * shoulder_width

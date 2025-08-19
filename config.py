@@ -88,9 +88,9 @@ CHECK_PARAMS = {
     "front": {
         "torso_sway": {
             # 基准垂直线向外侧偏移比例(相对肩宽)
-            "line_outer_offset_ratio": 0.02,
+            "line_outer_offset_ratio": 0.01,
             # 躯干越界允许容差(相对肩宽)
-            "torso_tolerance_ratio": 0.05,
+            "torso_tolerance_ratio": 0.001,
         },
         "hip_rotation": {
             # 髋部旋转角允许范围(度)
